@@ -1,6 +1,5 @@
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
+const cors = require("cors");
 const {
   albumId,
   databaseName,
@@ -16,6 +15,11 @@ const {
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const stickerKeyPattern = /^[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{1,2}$/;
+const corsOrigin = process.env.CORS_ORIGIN;
+
+if (corsOrigin) {
+  app.use(cors({ origin: corsOrigin }));
+}
 
 app.use(express.json({ limit: "80kb" }));
 
@@ -98,18 +102,6 @@ app.use((error, req, res, next) => {
   console.error(error);
   res.status(500).json({ error: "Error del servidor" });
 });
-
-const distPath = path.join(__dirname, "..", "dist");
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-  app.use((req, res, next) => {
-    if (req.method !== "GET" || req.path.startsWith("/api/")) {
-      return next();
-    }
-
-    return res.sendFile(path.join(distPath, "index.html"));
-  });
-}
 
 ensureDatabase()
   .then(() => {

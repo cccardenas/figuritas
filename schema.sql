@@ -1,0 +1,14 @@
+CREATE DATABASE IF NOT EXISTS figuritas_2026
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+USE figuritas_2026;
+
+CREATE TABLE IF NOT EXISTS sticker_counts (
+  album_id VARCHAR(64) NOT NULL,
+  sticker_key VARCHAR(80) NOT NULL,
+  count TINYINT UNSIGNED NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (album_id, sticker_key),
+  CONSTRAINT chk_sticker_count_range CHECK (count BETWEEN 0 AND 99)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
