@@ -26,10 +26,28 @@ const app = express();
 const port = Number(process.env.PORT || 3001);
 const stickerKeyPattern = /^[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{1,2}$/;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const corsOrigin = process.env.CORS_ORIGIN;
+const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
 
-if (corsOrigin) {
-  app.use(cors({ origin: corsOrigin }));
+function parseCorsOrigins(value) {
+  return String(value || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+if (corsOrigins.length > 0) {
+  app.use(
+    cors({
+      allowedHeaders: ["Content-Type", "Authorization"],
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      origin(origin, callback) {
+        if (!origin) return callback(null, true);
+        if (corsOrigins.includes("*")) return callback(null, true);
+
+        return callback(null, corsOrigins.includes(origin.replace(/\/$/, "")));
+      },
+    }),
+  );
 }
 
 app.use(express.json({ limit: "80kb" }));
