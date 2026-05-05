@@ -9,14 +9,23 @@ const {
 } = require("./auth");
 const {
   albumId,
+  cancelFriendRequest,
   createUser,
   databaseName,
   ensureDatabase,
   findUserByEmail,
   findUserById,
+  getCountrySummaries,
+  getExchangeSummary,
+  listFriendRequests,
+  listFriends,
   pingDatabase,
   getCounts,
   adjustSticker,
+  removeFriend,
+  respondToFriendRequest,
+  searchUsers,
+  sendFriendRequest,
   setStickerCount,
   replaceCounts,
   resetAlbum,
@@ -27,6 +36,7 @@ const port = Number(process.env.PORT || 3001);
 const stickerKeyPattern = /^[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{1,2}$/;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
+let databaseStartupError = null;
 
 function parseCorsOrigins(value) {
   return String(value || "")
@@ -71,6 +81,18 @@ function normalizeEmail(email) {
 function normalizeName(name) {
   const safeName = String(name || "").trim();
   return safeName ? safeName.slice(0, 80) : null;
+}
+
+function parsePositiveInt(value, message) {
+  const id = Number(value);
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    const error = new Error(message);
+    error.status = 400;
+    throw error;
+  }
+
+  return id;
 }
 
 function validateAuthInput(req, res) {
@@ -203,12 +225,100 @@ app.get("/api/auth/me", authenticate, (req, res) => {
   res.json({ user: publicUser(req.user) });
 });
 
+app.get("/api/users/search", authenticate, async (req, res, next) => {
+  try {
+    const users = await searchUsers(req.user.id, req.query.q, req.query.limit);
+    res.json({ users });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/friends", authenticate, async (req, res, next) => {
+  try {
+    res.json({ friends: await listFriends(req.user.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/friends/:friendId", authenticate, async (req, res, next) => {
+  try {
+    const friendId = parsePositiveInt(req.params.friendId, "Amigo invalido");
+    await removeFriend(req.user.id, friendId);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/friend-requests", authenticate, async (req, res, next) => {
+  try {
+    res.json(await listFriendRequests(req.user.id));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/friend-requests", authenticate, async (req, res, next) => {
+  try {
+    const userId = parsePositiveInt(req.body?.userId, "Usuario invalido");
+    const request = await sendFriendRequest(req.user.id, userId);
+    res.status(201).json({ request });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/friend-requests/:requestId/accept", authenticate, async (req, res, next) => {
+  try {
+    const requestId = parsePositiveInt(req.params.requestId, "Solicitud invalida");
+    const request = await respondToFriendRequest(req.user.id, requestId, "accept");
+    res.json({ request });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/friend-requests/:requestId/reject", authenticate, async (req, res, next) => {
+  try {
+    const requestId = parsePositiveInt(req.params.requestId, "Solicitud invalida");
+    const request = await respondToFriendRequest(req.user.id, requestId, "reject");
+    res.json({ request });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/friend-requests/:requestId", authenticate, async (req, res, next) => {
+  try {
+    const requestId = parsePositiveInt(req.params.requestId, "Solicitud invalida");
+    await cancelFriendRequest(req.user.id, requestId);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/health", async (req, res) => {
   try {
     await pingDatabase();
     res.json({ ok: true, albumId, database: databaseName });
   } catch (error) {
-    res.status(503).json({ ok: false, error: error.message });
+    res.status(503).json({
+      ok: false,
+      database: databaseName,
+      error: databaseStartupError?.message || error.message,
+    });
+  }
+});
+
+app.get("/api/stickers/countries", authenticate, async (req, res, next) => {
+  try {
+    const countries = await getCountrySummaries(req.user.id, req.query.q);
+    res.json({ albumId, countries });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -287,6 +397,14 @@ app.delete("/api/stickers", authenticate, async (req, res, next) => {
   }
 });
 
+app.get("/api/exchange", authenticate, async (req, res, next) => {
+  try {
+    res.json(await getExchangeSummary(req.user.id));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use((error, req, res, next) => {
   const status = Number(error.status || error.statusCode || 500);
 
@@ -297,20 +415,24 @@ app.use((error, req, res, next) => {
   res.status(status).json({ error: status >= 500 ? "Error del servidor" : error.message });
 });
 
-ensureDatabase()
-  .then(() => {
-    app.listen(port, "0.0.0.0", () => {
-      console.log(`API lista en http://localhost:${port}`);
-      console.log(`Album compartido: ${albumId}`);
-      const authWarning = getAuthWarning();
-      if (authWarning) console.warn(authWarning);
-    });
-  })
-  .catch((error) => {
+async function initializeDatabase() {
+  try {
+    await ensureDatabase();
+    databaseStartupError = null;
+  } catch (error) {
+    databaseStartupError = error;
     console.error("No se pudo iniciar la base de datos MySQL:");
     console.error(`Host: ${process.env.DB_HOST || "localhost"}`);
     console.error(`Usuario: ${process.env.DB_USER || "root"}`);
     console.error(`Base: ${process.env.DB_NAME || "figuritas_2026"}`);
     console.error(error.message);
-    process.exit(1);
-  });
+  }
+}
+
+app.listen(port, "0.0.0.0", () => {
+  console.log(`API lista en http://localhost:${port}`);
+  console.log(`Album compartido: ${albumId}`);
+  const authWarning = getAuthWarning();
+  if (authWarning) console.warn(authWarning);
+  initializeDatabase();
+});
