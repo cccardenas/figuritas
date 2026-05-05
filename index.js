@@ -12,7 +12,6 @@ const {
   resetAlbum,
 } = require("./db");
 
-
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const stickerKeyPattern = /^[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{1,2}$/;
@@ -23,6 +22,10 @@ if (corsOrigin) {
 }
 
 app.use(express.json({ limit: "80kb" }));
+
+app.get("/", (req, res) => {
+  res.json({ ok: true, service: "figuritas-api" });
+});
 
 function validateStickerKey(req, res, next) {
   const { stickerKey } = req.params;
