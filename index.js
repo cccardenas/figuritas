@@ -116,6 +116,9 @@ ensureDatabase()
   })
   .catch((error) => {
     console.error("No se pudo iniciar la base de datos MySQL:");
+    console.error(`Host: ${process.env.DB_HOST || "localhost"}`);
+    console.error(`Usuario: ${process.env.DB_USER || "root"}`);
+    console.error(`Base: ${process.env.DB_NAME || "figuritas_2026"}`);
     console.error(error.message);
     process.exit(1);
   });
