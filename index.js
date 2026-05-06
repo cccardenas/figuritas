@@ -33,7 +33,7 @@ const {
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
-const stickerKeyPattern = /^[A-Z0-9]+(?:-[A-Z0-9]+)*-[0-9]{1,2}$/;
+const stickerKeyPattern = /^(?=.{1,80}$)[A-Z0-9]+(?:-[A-Z0-9]+)*$/;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGIN);
 let databaseStartupError = null;

@@ -223,7 +223,7 @@ function mapFriendRequest(row, currentUserId) {
 }
 
 function getStickerCountryKey(stickerKey) {
-  const match = String(stickerKey).match(/^(.+)-[0-9]{1,2}$/);
+  const match = String(stickerKey).match(/^(.+)-[0-9]{1,4}$/);
   return match ? match[1] : stickerKey;
 }
 
