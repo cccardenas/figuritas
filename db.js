@@ -3,6 +3,7 @@ require("dotenv").config();
 
 const albumId = process.env.ALBUM_ID || "worldcup-2026";
 const databaseName = process.env.DB_NAME || "figuritas_2026";
+const stickerKeyPattern = /^(?=.{1,80}$)[A-Z0-9]+(?:-[A-Z0-9]+)*$/;
 
 const baseConfig = {
   host: process.env.DB_HOST || "localhost",
@@ -98,7 +99,44 @@ async function ensureTables(connectionPool) {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
 
+  await connectionPool.query(`
+    CREATE TABLE IF NOT EXISTS exchanges (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      user_id BIGINT UNSIGNED NOT NULL,
+      friend_id BIGINT UNSIGNED NOT NULL,
+      awaiting_user_id BIGINT UNSIGNED NOT NULL,
+      last_offered_by_user_id BIGINT UNSIGNED NOT NULL,
+      album_id VARCHAR(64) NOT NULL,
+      status ENUM('pending', 'confirmed', 'rejected', 'cancelled') NOT NULL DEFAULT 'pending',
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      responded_at TIMESTAMP NULL DEFAULT NULL,
+      PRIMARY KEY (id),
+      KEY idx_exchanges_user (user_id, album_id, created_at),
+      KEY idx_exchanges_user_status (user_id, album_id, status, created_at),
+      KEY idx_exchanges_friend_status (friend_id, album_id, status, created_at),
+      KEY idx_exchanges_awaiting_status (awaiting_user_id, album_id, status, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await connectionPool.query(`
+    CREATE TABLE IF NOT EXISTS exchange_items (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      exchange_id BIGINT UNSIGNED NOT NULL,
+      direction ENUM('give', 'receive') NOT NULL,
+      sticker_key VARCHAR(80) NOT NULL,
+      quantity TINYINT UNSIGNED NOT NULL,
+      friend_id BIGINT UNSIGNED NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_exchange_items_exchange (exchange_id),
+      KEY idx_exchange_items_friend (friend_id),
+      CONSTRAINT chk_exchange_item_quantity CHECK (quantity BETWEEN 1 AND 99)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
   await migrateStickerCountsTable(connectionPool);
+  await migrateExchangeTables(connectionPool);
 }
 
 async function migrateStickerCountsTable(connectionPool) {
@@ -140,6 +178,123 @@ async function migrateStickerCountsTable(connectionPool) {
       ADD PRIMARY KEY (user_id, album_id, sticker_key)
     `);
   }
+}
+
+async function getTableColumnNames(connectionPool, tableName) {
+  const [columns] = await connectionPool.query(
+    `SELECT COLUMN_NAME
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+    [databaseName, tableName],
+  );
+
+  return new Set(columns.map((row) => row.COLUMN_NAME));
+}
+
+async function ensureIndex(connectionPool, tableName, indexName, createSql) {
+  const [indexes] = await connectionPool.query(
+    `SELECT INDEX_NAME
+     FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?
+     LIMIT 1`,
+    [databaseName, tableName, indexName],
+  );
+
+  if (indexes.length === 0) {
+    await connectionPool.query(createSql);
+  }
+}
+
+async function migrateExchangeTables(connectionPool) {
+  const exchangeColumns = await getTableColumnNames(connectionPool, "exchanges");
+
+  if (!exchangeColumns.has("friend_id")) {
+    await connectionPool.query(`
+      ALTER TABLE exchanges
+      ADD COLUMN friend_id BIGINT UNSIGNED NULL AFTER user_id
+    `);
+
+    await connectionPool.query(`
+      UPDATE exchanges e
+      LEFT JOIN (
+        SELECT exchange_id, MIN(friend_id) AS friend_id
+        FROM exchange_items
+        GROUP BY exchange_id
+      ) ei ON ei.exchange_id = e.id
+      SET e.friend_id = ei.friend_id
+      WHERE e.friend_id IS NULL
+    `);
+  }
+
+  if (!exchangeColumns.has("status")) {
+    await connectionPool.query(`
+      ALTER TABLE exchanges
+      ADD COLUMN status ENUM('pending', 'confirmed', 'rejected', 'cancelled') NOT NULL DEFAULT 'confirmed' AFTER album_id
+    `);
+    await connectionPool.query("ALTER TABLE exchanges ALTER status SET DEFAULT 'pending'");
+  }
+
+  if (!exchangeColumns.has("awaiting_user_id")) {
+    await connectionPool.query(`
+      ALTER TABLE exchanges
+      ADD COLUMN awaiting_user_id BIGINT UNSIGNED NULL AFTER friend_id
+    `);
+  }
+
+  if (!exchangeColumns.has("last_offered_by_user_id")) {
+    await connectionPool.query(`
+      ALTER TABLE exchanges
+      ADD COLUMN last_offered_by_user_id BIGINT UNSIGNED NULL AFTER awaiting_user_id
+    `);
+  }
+
+  await connectionPool.query(`
+    UPDATE exchanges
+    SET last_offered_by_user_id = user_id
+    WHERE last_offered_by_user_id IS NULL
+  `);
+
+  await connectionPool.query(`
+    UPDATE exchanges
+    SET awaiting_user_id = CASE
+      WHEN status = 'pending' THEN friend_id
+      ELSE NULL
+    END
+    WHERE awaiting_user_id IS NULL
+  `);
+
+  if (!exchangeColumns.has("updated_at")) {
+    await connectionPool.query(`
+      ALTER TABLE exchanges
+      ADD COLUMN updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at
+    `);
+  }
+
+  if (!exchangeColumns.has("responded_at")) {
+    await connectionPool.query(`
+      ALTER TABLE exchanges
+      ADD COLUMN responded_at TIMESTAMP NULL DEFAULT NULL AFTER updated_at
+    `);
+  }
+
+  await ensureIndex(
+    connectionPool,
+    "exchanges",
+    "idx_exchanges_user_status",
+    "CREATE INDEX idx_exchanges_user_status ON exchanges (user_id, album_id, status, created_at)",
+  );
+  await ensureIndex(
+    connectionPool,
+    "exchanges",
+    "idx_exchanges_friend_status",
+    "CREATE INDEX idx_exchanges_friend_status ON exchanges (friend_id, album_id, status, created_at)",
+  );
+  await ensureIndex(
+    connectionPool,
+    "exchanges",
+    "idx_exchanges_awaiting_status",
+    "CREATE INDEX idx_exchanges_awaiting_status ON exchanges (awaiting_user_id, album_id, status, created_at)",
+  );
 }
 
 function getPool() {
@@ -193,6 +348,351 @@ function createHttpError(status, message) {
   const error = new Error(message);
   error.status = status;
   return error;
+}
+
+function normalizeExchangeFriendId(value) {
+  const id = Number(value);
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw createHttpError(400, "Amigo invalido");
+  }
+
+  return id;
+}
+
+function normalizeExchangeItems(items, fieldName, defaultFriendId) {
+  const rawItems = items ?? [];
+
+  if (!Array.isArray(rawItems)) {
+    throw createHttpError(400, `Formato de ${fieldName} invalido`);
+  }
+
+  if (rawItems.length > 100) {
+    throw createHttpError(400, `Demasiadas figuritas en ${fieldName}`);
+  }
+
+  return rawItems.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw createHttpError(400, `Item de ${fieldName} invalido`);
+    }
+
+    const stickerKey = String(item.stickerKey || "").trim().toUpperCase();
+    const quantity = Number(item.quantity);
+
+    if (!stickerKeyPattern.test(stickerKey)) {
+      throw createHttpError(400, "Codigo de figurita invalido");
+    }
+
+    if (!Number.isSafeInteger(quantity) || quantity <= 0 || quantity > 99) {
+      throw createHttpError(400, "Cantidad invalida");
+    }
+
+    return {
+      stickerKey,
+      quantity,
+      friendId: normalizeExchangeFriendId(item.friendId ?? defaultFriendId),
+    };
+  });
+}
+
+function normalizeExchangePayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw createHttpError(400, "Formato de intercambio invalido");
+  }
+
+  const defaultFriendId =
+    payload.friendId === undefined || payload.friendId === null
+      ? null
+      : normalizeExchangeFriendId(payload.friendId);
+  const give = normalizeExchangeItems(payload.give, "figuritas entregadas", defaultFriendId);
+  const receive = normalizeExchangeItems(payload.receive, "figuritas recibidas", defaultFriendId);
+  const totalItems = give.length + receive.length;
+
+  if (give.length === 0 || receive.length === 0) {
+    throw createHttpError(400, "El intercambio debe incluir figuritas entregadas y recibidas");
+  }
+
+  if (totalItems > 100) {
+    throw createHttpError(400, "Demasiadas figuritas en el intercambio");
+  }
+
+  const friendIds = getExchangeFriendIds(give, receive);
+  if (friendIds.length !== 1) {
+    throw createHttpError(400, "Cada intercambio debe ser con un solo amigo");
+  }
+
+  return { friendId: friendIds[0], give, receive };
+}
+
+function sumQuantitiesBySticker(items) {
+  const totals = new Map();
+
+  for (const item of items) {
+    const quantity = (totals.get(item.stickerKey) || 0) + item.quantity;
+
+    if (quantity > 99) {
+      throw createHttpError(400, `Cantidad acumulada invalida para ${item.stickerKey}`);
+    }
+
+    totals.set(item.stickerKey, quantity);
+  }
+
+  return totals;
+}
+
+function getExchangeFriendIds(give, receive) {
+  return Array.from(new Set([...give, ...receive].map((item) => item.friendId)));
+}
+
+function normalizeExchangeId(exchangeId) {
+  const id = Number(exchangeId);
+
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw createHttpError(400, "Intercambio invalido");
+  }
+
+  return id;
+}
+
+async function getAcceptedFriendMap(connection, userId, friendIds) {
+  if (friendIds.length === 0) return new Map();
+
+  const [rows] = await connection.query(
+    `SELECT DISTINCT u.id, u.email, u.name
+     FROM users u
+     JOIN friend_requests fr
+       ON (
+         (fr.requester_id = ? AND fr.addressee_id = u.id)
+         OR (fr.requester_id = u.id AND fr.addressee_id = ?)
+       )
+     WHERE fr.status = 'accepted'
+       AND u.id IN (?)`,
+    [userId, userId, friendIds],
+  );
+
+  const friendById = new Map(rows.map((row) => [Number(row.id), mapPublicUser(row)]));
+  const missingFriendIds = friendIds.filter((friendId) => !friendById.has(friendId));
+
+  if (missingFriendIds.length > 0) {
+    throw createHttpError(400, "Solo puedes intercambiar con amigos aceptados");
+  }
+
+  return friendById;
+}
+
+async function getCountsWithConnection(connection, userId) {
+  const [rows] = await connection.query(
+    "SELECT sticker_key, count FROM sticker_counts WHERE user_id = ? AND album_id = ?",
+    [userId, albumId],
+  );
+
+  return rows.reduce((counts, row) => {
+    counts[row.sticker_key] = Number(row.count);
+    return counts;
+  }, {});
+}
+
+async function insertExchangeItems(connection, exchangeId, direction, items) {
+  if (items.length === 0) return;
+
+  await connection.query(
+    `INSERT INTO exchange_items (exchange_id, direction, sticker_key, quantity, friend_id)
+     VALUES ?`,
+    [items.map((item) => [exchangeId, direction, item.stickerKey, item.quantity, item.friendId])],
+  );
+}
+
+function mapExchangeItem(row) {
+  return {
+    stickerKey: row.sticker_key,
+    quantity: Number(row.quantity),
+    friendId: Number(row.friend_id),
+  };
+}
+
+function groupExchangeItems(rows) {
+  const itemsByExchangeId = new Map();
+
+  for (const row of rows) {
+    const exchangeId = Number(row.exchange_id);
+    const items = itemsByExchangeId.get(exchangeId) || { give: [], receive: [] };
+
+    items[row.direction].push(mapExchangeItem(row));
+    itemsByExchangeId.set(exchangeId, items);
+  }
+
+  return itemsByExchangeId;
+}
+
+function mapExchange(row, items, currentUserId) {
+  const safeCurrentUserId = Number(currentUserId);
+  const requesterId = Number(row.requester_id);
+  const friendId = Number(row.friend_id);
+  const awaitingUserId = row.awaiting_user_id ? Number(row.awaiting_user_id) : null;
+  const lastOfferedByUserId = row.last_offered_by_user_id
+    ? Number(row.last_offered_by_user_id)
+    : requesterId;
+  const requester = mapPublicUser({
+    id: row.requester_id,
+    email: row.requester_email,
+    name: row.requester_name,
+  });
+  const friend = mapPublicUser({
+    id: row.friend_id,
+    email: row.friend_email,
+    name: row.friend_name,
+  });
+  const awaitingUser = awaitingUserId
+    ? mapPublicUser({
+        id: row.awaiting_user_id,
+        email: row.awaiting_user_email,
+        name: row.awaiting_user_name,
+      })
+    : null;
+  const lastOfferedBy = lastOfferedByUserId
+    ? mapPublicUser({
+        id: row.last_offered_by_user_id || requesterId,
+        email: row.last_offered_by_email || row.requester_email,
+        name: row.last_offered_by_name || row.requester_name,
+      })
+    : null;
+  const direction =
+    row.status === "pending"
+      ? awaitingUserId === safeCurrentUserId
+        ? "incoming"
+        : "outgoing"
+      : lastOfferedByUserId === safeCurrentUserId
+        ? "outgoing"
+        : "incoming";
+
+  return {
+    id: Number(row.id),
+    albumId: row.album_id,
+    status: row.status,
+    direction,
+    participantRole: requesterId === safeCurrentUserId ? "requester" : "friend",
+    awaitingUserId,
+    lastOfferedByUserId,
+    canRespond: row.status === "pending" && awaitingUserId === safeCurrentUserId,
+    canCounter: row.status === "pending" && awaitingUserId === safeCurrentUserId,
+    requester,
+    friend,
+    awaitingUser,
+    lastOfferedBy,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    respondedAt: row.responded_at,
+    give: items?.give || [],
+    receive: items?.receive || [],
+  };
+}
+
+async function getExchangeItemsByIds(connection, exchangeIds) {
+  if (exchangeIds.length === 0) return new Map();
+
+  const [rows] = await connection.query(
+    `SELECT exchange_id, direction, sticker_key, quantity, friend_id
+     FROM exchange_items
+     WHERE exchange_id IN (?)
+     ORDER BY id`,
+    [exchangeIds],
+  );
+
+  return groupExchangeItems(rows);
+}
+
+async function getExchangeForParticipant(connection, exchangeId, currentUserId, lock = false) {
+  const [rows] = await connection.query(
+    `SELECT
+       e.id,
+       e.user_id AS requester_id,
+       e.friend_id,
+       e.awaiting_user_id,
+       e.last_offered_by_user_id,
+       e.album_id,
+       e.status,
+       e.created_at,
+       e.updated_at,
+       e.responded_at,
+       requester.email AS requester_email,
+       requester.name AS requester_name,
+       friend.email AS friend_email,
+       friend.name AS friend_name,
+       awaiting_user.email AS awaiting_user_email,
+       awaiting_user.name AS awaiting_user_name,
+       last_offered_by.email AS last_offered_by_email,
+       last_offered_by.name AS last_offered_by_name
+     FROM exchanges e
+     JOIN users requester ON requester.id = e.user_id
+     LEFT JOIN users friend ON friend.id = e.friend_id
+     LEFT JOIN users awaiting_user ON awaiting_user.id = e.awaiting_user_id
+     LEFT JOIN users last_offered_by ON last_offered_by.id = e.last_offered_by_user_id
+     WHERE e.id = ?
+       AND e.album_id = ?
+       AND (e.user_id = ? OR e.friend_id = ?)
+     LIMIT 1
+     ${lock ? "FOR UPDATE" : ""}`,
+    [exchangeId, albumId, currentUserId, currentUserId],
+  );
+
+  if (!rows[0]) {
+    throw createHttpError(404, "Intercambio no encontrado");
+  }
+
+  return rows[0];
+}
+
+async function getExchangeResponse(connection, exchangeId, currentUserId) {
+  const row = await getExchangeForParticipant(connection, exchangeId, currentUserId);
+  const itemsByExchangeId = await getExchangeItemsByIds(connection, [exchangeId]);
+
+  return mapExchange(row, itemsByExchangeId.get(exchangeId), currentUserId);
+}
+
+async function validateDuplicateAvailability(connection, userId, totals, messageForSticker) {
+  for (const [stickerKey, quantity] of totals) {
+    const [rows] = await connection.query(
+      `SELECT count
+       FROM sticker_counts
+       WHERE user_id = ? AND album_id = ? AND sticker_key = ?
+       FOR UPDATE`,
+      [userId, albumId, stickerKey],
+    );
+    const count = Number(rows[0]?.count || 0);
+
+    if (count < quantity + 1) {
+      throw createHttpError(409, messageForSticker(stickerKey));
+    }
+  }
+}
+
+async function subtractDuplicateCounts(connection, userId, totals, messageForSticker) {
+  for (const [stickerKey, quantity] of totals) {
+    const [result] = await connection.query(
+      `UPDATE sticker_counts
+       SET count = count - ?
+       WHERE user_id = ?
+         AND album_id = ?
+         AND sticker_key = ?
+         AND count >= ?`,
+      [quantity, userId, albumId, stickerKey, quantity + 1],
+    );
+
+    if (result.affectedRows === 0) {
+      throw createHttpError(409, messageForSticker(stickerKey));
+    }
+  }
+}
+
+async function addStickerCounts(connection, userId, totals) {
+  for (const [stickerKey, quantity] of totals) {
+    await connection.query(
+      `INSERT INTO sticker_counts (user_id, album_id, sticker_key, count)
+       VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE count = LEAST(99, count + VALUES(count))`,
+      [userId, albumId, stickerKey, quantity],
+    );
+  }
 }
 
 function mapFriendRequest(row, currentUserId) {
@@ -622,6 +1122,331 @@ async function getExchangeSummary(userId) {
   };
 }
 
+async function createExchangeProposal(userId, payload) {
+  const safeUserId = normalizeUserId(userId);
+  const { friendId, give, receive } = normalizeExchangePayload(payload);
+  const giveTotals = sumQuantitiesBySticker(give);
+  const receiveTotals = sumQuantitiesBySticker(receive);
+  const connection = await getPool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+    await getAcceptedFriendMap(connection, safeUserId, [friendId]);
+    await validateDuplicateAvailability(
+      connection,
+      safeUserId,
+      giveTotals,
+      (stickerKey) => `No tienes suficientes repetidas de ${stickerKey}`,
+    );
+    await validateDuplicateAvailability(
+      connection,
+      friendId,
+      receiveTotals,
+      (stickerKey) => `Tu amigo no tiene suficientes repetidas de ${stickerKey}`,
+    );
+
+    const [exchangeResult] = await connection.query(
+      `INSERT INTO exchanges
+       (user_id, friend_id, awaiting_user_id, last_offered_by_user_id, album_id, status)
+       VALUES (?, ?, ?, ?, ?, 'pending')`,
+      [safeUserId, friendId, friendId, safeUserId, albumId],
+    );
+    const exchangeId = Number(exchangeResult.insertId);
+
+    await insertExchangeItems(connection, exchangeId, "give", give);
+    await insertExchangeItems(connection, exchangeId, "receive", receive);
+
+    const exchange = await getExchangeResponse(connection, exchangeId, safeUserId);
+    const counts = await getCountsWithConnection(connection, safeUserId);
+
+    await connection.commit();
+
+    return {
+      albumId,
+      exchange,
+      counts,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function listExchanges(userId, status = "pending") {
+  const safeUserId = normalizeUserId(userId);
+  const safeStatus = String(status || "pending").trim().toLowerCase();
+  const statuses = ["pending", "confirmed", "rejected", "cancelled"];
+  const params = [albumId, safeUserId, safeUserId];
+  let statusClause = "";
+
+  if (safeStatus !== "all") {
+    if (!statuses.includes(safeStatus)) {
+      throw createHttpError(400, "Estado de intercambio invalido");
+    }
+
+    statusClause = "AND e.status = ?";
+    params.push(safeStatus);
+  }
+
+  const [rows] = await getPool().query(
+    `SELECT
+       e.id,
+       e.user_id AS requester_id,
+       e.friend_id,
+       e.awaiting_user_id,
+       e.last_offered_by_user_id,
+       e.album_id,
+       e.status,
+       e.created_at,
+       e.updated_at,
+       e.responded_at,
+       requester.email AS requester_email,
+       requester.name AS requester_name,
+       friend.email AS friend_email,
+       friend.name AS friend_name,
+       awaiting_user.email AS awaiting_user_email,
+       awaiting_user.name AS awaiting_user_name,
+       last_offered_by.email AS last_offered_by_email,
+       last_offered_by.name AS last_offered_by_name
+     FROM exchanges e
+     JOIN users requester ON requester.id = e.user_id
+     LEFT JOIN users friend ON friend.id = e.friend_id
+     LEFT JOIN users awaiting_user ON awaiting_user.id = e.awaiting_user_id
+     LEFT JOIN users last_offered_by ON last_offered_by.id = e.last_offered_by_user_id
+     WHERE e.album_id = ?
+       AND (e.user_id = ? OR e.friend_id = ?)
+       ${statusClause}
+     ORDER BY e.created_at DESC
+     LIMIT 50`,
+    params,
+  );
+  const exchangeIds = rows.map((row) => Number(row.id));
+  const itemsByExchangeId = await getExchangeItemsByIds(getPool(), exchangeIds);
+  const exchanges = rows.map((row) =>
+    mapExchange(row, itemsByExchangeId.get(Number(row.id)), safeUserId),
+  );
+
+  return {
+    albumId,
+    incoming: exchanges.filter((exchange) => exchange.direction === "incoming"),
+    outgoing: exchanges.filter((exchange) => exchange.direction === "outgoing"),
+    exchanges,
+  };
+}
+
+async function counterExchange(userId, exchangeId, payload) {
+  const safeUserId = normalizeUserId(userId);
+  const safeExchangeId = normalizeExchangeId(exchangeId);
+  const connection = await getPool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const row = await getExchangeForParticipant(connection, safeExchangeId, safeUserId, true);
+    const requesterId = Number(row.requester_id);
+    const friendId = Number(row.friend_id);
+    const awaitingUserId = Number(row.awaiting_user_id);
+
+    if (row.status !== "pending") {
+      throw createHttpError(409, "El intercambio ya no esta pendiente");
+    }
+
+    if (safeUserId !== awaitingUserId) {
+      throw createHttpError(403, "Solo quien debe responder puede hacer una contraoferta");
+    }
+
+    const otherUserId = safeUserId === requesterId ? friendId : requesterId;
+    const counterPayload =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? { ...payload, friendId: payload.friendId ?? otherUserId }
+        : payload;
+    const { friendId: counterFriendId, give, receive } = normalizeExchangePayload(counterPayload);
+
+    if (counterFriendId !== otherUserId) {
+      throw createHttpError(400, "La contraoferta debe ser con el otro participante");
+    }
+
+    const giveTotals = sumQuantitiesBySticker(give);
+    const receiveTotals = sumQuantitiesBySticker(receive);
+
+    await getAcceptedFriendMap(connection, requesterId, [friendId]);
+    await validateDuplicateAvailability(
+      connection,
+      safeUserId,
+      giveTotals,
+      (stickerKey) => `No tienes suficientes repetidas de ${stickerKey}`,
+    );
+    await validateDuplicateAvailability(
+      connection,
+      otherUserId,
+      receiveTotals,
+      (stickerKey) => `El otro usuario no tiene suficientes repetidas de ${stickerKey}`,
+    );
+
+    await connection.query("DELETE FROM exchange_items WHERE exchange_id = ?", [safeExchangeId]);
+    await insertExchangeItems(connection, safeExchangeId, "give", give);
+    await insertExchangeItems(connection, safeExchangeId, "receive", receive);
+
+    await connection.query(
+      `UPDATE exchanges
+       SET awaiting_user_id = ?,
+           last_offered_by_user_id = ?,
+           responded_at = NULL
+       WHERE id = ?`,
+      [otherUserId, safeUserId, safeExchangeId],
+    );
+
+    const exchange = await getExchangeResponse(connection, safeExchangeId, safeUserId);
+    const counts = await getCountsWithConnection(connection, safeUserId);
+
+    await connection.commit();
+
+    return {
+      albumId,
+      exchange,
+      counts,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function confirmExchange(userId, exchangeId) {
+  const safeUserId = normalizeUserId(userId);
+  const safeExchangeId = normalizeExchangeId(exchangeId);
+  const connection = await getPool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const row = await getExchangeForParticipant(connection, safeExchangeId, safeUserId, true);
+    const requesterId = Number(row.requester_id);
+    const friendId = Number(row.friend_id);
+    const awaitingUserId = Number(row.awaiting_user_id);
+    const lastOfferedByUserId = Number(row.last_offered_by_user_id || requesterId);
+
+    if (safeUserId !== awaitingUserId) {
+      throw createHttpError(403, "Solo quien recibe la ultima oferta puede confirmarla");
+    }
+
+    if (row.status !== "pending") {
+      throw createHttpError(409, "El intercambio ya no esta pendiente");
+    }
+
+    if (![requesterId, friendId].includes(lastOfferedByUserId)) {
+      throw createHttpError(409, "La oferta esta incompleta");
+    }
+
+    await getAcceptedFriendMap(connection, requesterId, [friendId]);
+
+    const itemsByExchangeId = await getExchangeItemsByIds(connection, [safeExchangeId]);
+    const items = itemsByExchangeId.get(safeExchangeId) || { give: [], receive: [] };
+    const giveTotals = sumQuantitiesBySticker(items.give);
+    const receiveTotals = sumQuantitiesBySticker(items.receive);
+
+    await subtractDuplicateCounts(
+      connection,
+      lastOfferedByUserId,
+      giveTotals,
+      (stickerKey) => `Quien hizo la ultima oferta ya no tiene suficientes repetidas de ${stickerKey}`,
+    );
+    await subtractDuplicateCounts(
+      connection,
+      awaitingUserId,
+      receiveTotals,
+      (stickerKey) => `No tienes suficientes repetidas de ${stickerKey}`,
+    );
+
+    await addStickerCounts(connection, awaitingUserId, giveTotals);
+    await addStickerCounts(connection, lastOfferedByUserId, receiveTotals);
+
+    await connection.query(
+      `UPDATE exchanges
+       SET status = 'confirmed', responded_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [safeExchangeId],
+    );
+
+    const exchange = await getExchangeResponse(connection, safeExchangeId, safeUserId);
+    const counts = await getCountsWithConnection(connection, safeUserId);
+
+    await connection.commit();
+
+    return {
+      albumId,
+      exchange,
+      counts,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function rejectExchange(userId, exchangeId) {
+  return updatePendingExchangeStatus(userId, exchangeId, "rejected", "awaiting");
+}
+
+async function cancelExchange(userId, exchangeId) {
+  return updatePendingExchangeStatus(userId, exchangeId, "cancelled", "last_offered");
+}
+
+async function updatePendingExchangeStatus(userId, exchangeId, status, requiredTurn) {
+  const safeUserId = normalizeUserId(userId);
+  const safeExchangeId = normalizeExchangeId(exchangeId);
+  const connection = await getPool().getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const row = await getExchangeForParticipant(connection, safeExchangeId, safeUserId, true);
+    const expectedUserId =
+      requiredTurn === "awaiting"
+        ? Number(row.awaiting_user_id)
+        : Number(row.last_offered_by_user_id || row.requester_id);
+
+    if (safeUserId !== expectedUserId) {
+      const message =
+        status === "cancelled"
+          ? "Solo quien hizo la ultima oferta puede cancelarla"
+          : "Solo quien debe responder puede rechazarla";
+      throw createHttpError(403, message);
+    }
+
+    if (row.status !== "pending") {
+      throw createHttpError(409, "El intercambio ya no esta pendiente");
+    }
+
+    await connection.query(
+      `UPDATE exchanges
+       SET status = ?, responded_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [status, safeExchangeId],
+    );
+
+    const exchange = await getExchangeResponse(connection, safeExchangeId, safeUserId);
+
+    await connection.commit();
+
+    return {
+      albumId,
+      exchange,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function getCountrySummaries(userId, query) {
   const safeUserId = normalizeUserId(userId);
   const [myCounts, friends] = await Promise.all([getCounts(safeUserId), getAcceptedFriends(safeUserId)]);
@@ -791,6 +1616,10 @@ async function resetAlbum(userId) {
 module.exports = {
   albumId,
   cancelFriendRequest,
+  cancelExchange,
+  confirmExchange,
+  counterExchange,
+  createExchangeProposal,
   createUser,
   databaseName,
   ensureDatabase,
@@ -799,11 +1628,13 @@ module.exports = {
   getCountrySummaries,
   getExchangeSummary,
   pingDatabase,
+  listExchanges,
   listFriendRequests,
   listFriends,
   getCounts,
   adjustSticker,
   removeFriend,
+  rejectExchange,
   respondToFriendRequest,
   searchUsers,
   sendFriendRequest,

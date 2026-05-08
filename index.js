@@ -10,6 +10,10 @@ const {
 const {
   albumId,
   cancelFriendRequest,
+  cancelExchange,
+  confirmExchange,
+  counterExchange,
+  createExchangeProposal,
   createUser,
   databaseName,
   ensureDatabase,
@@ -17,12 +21,14 @@ const {
   findUserById,
   getCountrySummaries,
   getExchangeSummary,
+  listExchanges,
   listFriendRequests,
   listFriends,
   pingDatabase,
   getCounts,
   adjustSticker,
   removeFriend,
+  rejectExchange,
   respondToFriendRequest,
   searchUsers,
   sendFriendRequest,
@@ -400,6 +406,62 @@ app.delete("/api/stickers", authenticate, async (req, res, next) => {
 app.get("/api/exchange", authenticate, async (req, res, next) => {
   try {
     res.json(await getExchangeSummary(req.user.id));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/exchanges", authenticate, async (req, res, next) => {
+  try {
+    res.json(await listExchanges(req.user.id, req.query.status));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchanges", authenticate, async (req, res, next) => {
+  try {
+    res.status(201).json(await createExchangeProposal(req.user.id, req.body));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchanges/complete", authenticate, async (req, res, next) => {
+  try {
+    res.status(201).json(await createExchangeProposal(req.user.id, req.body));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchanges/:exchangeId/confirm", authenticate, async (req, res, next) => {
+  try {
+    res.json(await confirmExchange(req.user.id, req.params.exchangeId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchanges/:exchangeId/counter", authenticate, async (req, res, next) => {
+  try {
+    res.json(await counterExchange(req.user.id, req.params.exchangeId, req.body));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchanges/:exchangeId/reject", authenticate, async (req, res, next) => {
+  try {
+    res.json(await rejectExchange(req.user.id, req.params.exchangeId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchanges/:exchangeId/cancel", authenticate, async (req, res, next) => {
+  try {
+    res.json(await cancelExchange(req.user.id, req.params.exchangeId));
   } catch (error) {
     next(error);
   }
