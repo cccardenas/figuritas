@@ -20,7 +20,9 @@ const {
   findUserByEmail,
   findUserById,
   getCountrySummaries,
+  getDuplicateStickerExportRows,
   getExchangeSummary,
+  getMissingStickerExportRows,
   listExchanges,
   listFriendRequests,
   listFriends,
@@ -55,6 +57,7 @@ if (corsOrigins.length > 0) {
   app.use(
     cors({
       allowedHeaders: ["Content-Type", "Authorization"],
+      exposedHeaders: ["Content-Disposition"],
       methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
       origin(origin, callback) {
         if (!origin) return callback(null, true);
@@ -172,6 +175,43 @@ function validateStickerKey(req, res, next) {
   }
 
   return next();
+}
+
+function csvEscape(value) {
+  const text = value === undefined || value === null ? "" : String(value);
+
+  if (!/[",\r\n]/.test(text)) return text;
+
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function toCsv(rows, columns) {
+  const lines = [columns.map((column) => csvEscape(column.header)).join(",")];
+
+  for (const row of rows) {
+    lines.push(columns.map((column) => csvEscape(row[column.key])).join(","));
+  }
+
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+function safeFilenamePart(value) {
+  return (
+    String(value || "album")
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "album"
+  );
+}
+
+function sendCsv(res, filename, csv) {
+  res
+    .set({
+      "Cache-Control": "no-store",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Type": "text/csv; charset=utf-8",
+    })
+    .send(`\uFEFF${csv}`);
 }
 
 app.post("/api/auth/register", async (req, res, next) => {
@@ -335,6 +375,43 @@ app.get("/api/stickers", authenticate, async (req, res, next) => {
     next(error);
   }
 });
+
+async function downloadMissingCsv(req, res, next) {
+  try {
+    const rows = await getMissingStickerExportRows(req.user.id);
+    const csv = toCsv(rows, [
+      { header: "figurita", key: "stickerKey" },
+      { header: "pais", key: "countryKey" },
+    ]);
+    const filename = `figuritas-faltantes-${safeFilenamePart(albumId)}.csv`;
+
+    sendCsv(res, filename, csv);
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function downloadDuplicatesCsv(req, res, next) {
+  try {
+    const rows = await getDuplicateStickerExportRows(req.user.id);
+    const csv = toCsv(rows, [
+      { header: "figurita", key: "stickerKey" },
+      { header: "pais", key: "countryKey" },
+      { header: "cantidad", key: "count" },
+      { header: "repetidas_disponibles", key: "available" },
+    ]);
+    const filename = `figuritas-repetidas-${safeFilenamePart(albumId)}.csv`;
+
+    sendCsv(res, filename, csv);
+  } catch (error) {
+    next(error);
+  }
+}
+
+app.get("/api/stickers/export/missing", authenticate, downloadMissingCsv);
+app.get("/api/stickers/export/missing.csv", authenticate, downloadMissingCsv);
+app.get("/api/stickers/export/duplicates", authenticate, downloadDuplicatesCsv);
+app.get("/api/stickers/export/duplicates.csv", authenticate, downloadDuplicatesCsv);
 
 app.post(
   "/api/stickers/:stickerKey/adjust",

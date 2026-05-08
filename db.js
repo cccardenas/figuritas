@@ -1516,6 +1516,56 @@ async function getCounts(userId) {
   }, {});
 }
 
+function mapStickerExportRow(row) {
+  const stickerKey = row.sticker_key;
+  const countryKey = getStickerCountryKey(stickerKey);
+  const mappedRow = {
+    stickerKey,
+    countryKey,
+  };
+
+  if (row.count !== undefined) {
+    mappedRow.count = Number(row.count);
+    mappedRow.available = Math.max(0, mappedRow.count - 1);
+  }
+
+  return mappedRow;
+}
+
+async function getMissingStickerExportRows(userId) {
+  const safeUserId = normalizeUserId(userId);
+  const [rows] = await getPool().query(
+    `SELECT catalog.sticker_key
+     FROM (
+       SELECT DISTINCT sticker_key
+       FROM sticker_counts
+       WHERE album_id = ?
+     ) catalog
+     LEFT JOIN sticker_counts mine
+       ON mine.user_id = ?
+      AND mine.album_id = ?
+      AND mine.sticker_key = catalog.sticker_key
+     WHERE mine.sticker_key IS NULL
+     ORDER BY catalog.sticker_key`,
+    [albumId, safeUserId, albumId],
+  );
+
+  return rows.map(mapStickerExportRow);
+}
+
+async function getDuplicateStickerExportRows(userId) {
+  const safeUserId = normalizeUserId(userId);
+  const [rows] = await getPool().query(
+    `SELECT sticker_key, count
+     FROM sticker_counts
+     WHERE user_id = ? AND album_id = ? AND count > 1
+     ORDER BY sticker_key`,
+    [safeUserId, albumId],
+  );
+
+  return rows.map(mapStickerExportRow);
+}
+
 async function adjustSticker(userId, stickerKey, delta) {
   const safeUserId = normalizeUserId(userId);
   const safeDelta = Number(delta);
@@ -1627,6 +1677,8 @@ module.exports = {
   findUserById,
   getCountrySummaries,
   getExchangeSummary,
+  getDuplicateStickerExportRows,
+  getMissingStickerExportRows,
   pingDatabase,
   listExchanges,
   listFriendRequests,
