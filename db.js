@@ -1,5 +1,10 @@
 const mysql = require("mysql2/promise");
 require("dotenv").config();
+const {
+  buildCountsFromExternalText,
+  compareCountsWithExternalText,
+  getWorldCup2026CatalogKeys,
+} = require("./stickerTextImport");
 
 const albumId = process.env.ALBUM_ID || "worldcup-2026";
 const databaseName = process.env.DB_NAME || "figuritas_2026";
@@ -732,6 +737,33 @@ function getCountryLabel(countryKey) {
     .split("-")
     .filter(Boolean)
     .join(" ");
+}
+
+function getCatalogStickerKeys() {
+  return albumId === "worldcup-2026" ? getWorldCup2026CatalogKeys() : null;
+}
+
+function getCanonicalStickerKey(stickerKey) {
+  const safeStickerKey = String(stickerKey || "").trim().toUpperCase();
+  const legacyFwcMatch = safeStickerKey.match(/^(?:FWC-)?(00|0?[1-9]|1[0-9])$/);
+
+  if (albumId === "worldcup-2026" && legacyFwcMatch) {
+    const number = legacyFwcMatch[1] === "00" ? "00" : String(Number(legacyFwcMatch[1]));
+    return `FWC-${number}`;
+  }
+
+  return safeStickerKey;
+}
+
+function getCanonicalCounts(counts) {
+  const canonicalCounts = {};
+
+  for (const [stickerKey, count] of Object.entries(counts)) {
+    const canonicalKey = getCanonicalStickerKey(stickerKey);
+    canonicalCounts[canonicalKey] = (canonicalCounts[canonicalKey] || 0) + Number(count || 0);
+  }
+
+  return canonicalCounts;
 }
 
 async function createUser({ email, name, passwordHash }) {
@@ -1517,7 +1549,7 @@ async function getCounts(userId) {
 }
 
 function mapStickerExportRow(row) {
-  const stickerKey = row.sticker_key;
+  const stickerKey = getCanonicalStickerKey(row.sticker_key);
   const countryKey = getStickerCountryKey(stickerKey);
   const mappedRow = {
     stickerKey,
@@ -1534,6 +1566,20 @@ function mapStickerExportRow(row) {
 
 async function getMissingStickerExportRows(userId) {
   const safeUserId = normalizeUserId(userId);
+  const catalogKeys = getCatalogStickerKeys();
+
+  if (catalogKeys) {
+    const [rows] = await getPool().query(
+      "SELECT sticker_key FROM sticker_counts WHERE user_id = ? AND album_id = ? AND count > 0",
+      [safeUserId, albumId],
+    );
+    const ownedKeys = new Set(rows.map((row) => getCanonicalStickerKey(row.sticker_key)));
+
+    return catalogKeys
+      .filter((stickerKey) => !ownedKeys.has(stickerKey))
+      .map((stickerKey) => mapStickerExportRow({ sticker_key: stickerKey }));
+  }
+
   const [rows] = await getPool().query(
     `SELECT catalog.sticker_key
      FROM (
@@ -1555,6 +1601,27 @@ async function getMissingStickerExportRows(userId) {
 
 async function getDuplicateStickerExportRows(userId) {
   const safeUserId = normalizeUserId(userId);
+
+  if (getCatalogStickerKeys()) {
+    const [rows] = await getPool().query(
+      `SELECT sticker_key, count
+       FROM sticker_counts
+       WHERE user_id = ? AND album_id = ?`,
+      [safeUserId, albumId],
+    );
+    const canonicalCounts = getCanonicalCounts(
+      rows.reduce((counts, row) => {
+        counts[row.sticker_key] = Number(row.count);
+        return counts;
+      }, {}),
+    );
+
+    return Object.entries(canonicalCounts)
+      .filter(([, count]) => count > 1)
+      .map(([stickerKey, count]) => mapStickerExportRow({ sticker_key: stickerKey, count }))
+      .sort((a, b) => a.stickerKey.localeCompare(b.stickerKey));
+  }
+
   const [rows] = await getPool().query(
     `SELECT sticker_key, count
      FROM sticker_counts
@@ -1656,6 +1723,40 @@ async function replaceCounts(userId, counts) {
   }
 }
 
+async function importCountsFromExternalText(userId, payload) {
+  const safeUserId = normalizeUserId(userId);
+  const { counts, parsed, summary } = buildCountsFromExternalText(payload);
+
+  await replaceCounts(safeUserId, counts);
+
+  return {
+    albumId,
+    counts: await getCounts(safeUserId),
+    summary: {
+      ...summary,
+      ignoredLineCount: parsed.ignoredLines.length,
+    },
+    ignoredLines: parsed.ignoredLines,
+  };
+}
+
+async function getExternalExchangePreview(userId, payload) {
+  const safeUserId = normalizeUserId(userId);
+  const counts = getCanonicalCounts(await getCounts(safeUserId));
+  const comparison = compareCountsWithExternalText(counts, payload);
+
+  return {
+    albumId,
+    summary: {
+      ...comparison.summary,
+      ignoredLineCount: comparison.parsed.ignoredLines.length,
+    },
+    iHaveForThem: comparison.iHaveForThem,
+    iNeedFromThem: comparison.iNeedFromThem,
+    ignoredLines: comparison.parsed.ignoredLines,
+  };
+}
+
 async function resetAlbum(userId) {
   await getPool().query("DELETE FROM sticker_counts WHERE user_id = ? AND album_id = ?", [
     normalizeUserId(userId),
@@ -1677,8 +1778,10 @@ module.exports = {
   findUserById,
   getCountrySummaries,
   getExchangeSummary,
+  getExternalExchangePreview,
   getDuplicateStickerExportRows,
   getMissingStickerExportRows,
+  importCountsFromExternalText,
   pingDatabase,
   listExchanges,
   listFriendRequests,

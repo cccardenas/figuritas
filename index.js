@@ -22,7 +22,9 @@ const {
   getCountrySummaries,
   getDuplicateStickerExportRows,
   getExchangeSummary,
+  getExternalExchangePreview,
   getMissingStickerExportRows,
+  importCountsFromExternalText,
   listExchanges,
   listFriendRequests,
   listFriends,
@@ -471,6 +473,14 @@ app.put("/api/stickers", authenticate, async (req, res, next) => {
   }
 });
 
+app.post("/api/stickers/import/external-text", authenticate, async (req, res, next) => {
+  try {
+    res.json(await importCountsFromExternalText(req.user.id, req.body));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/stickers", authenticate, async (req, res, next) => {
   try {
     await resetAlbum(req.user.id);
@@ -483,6 +493,14 @@ app.delete("/api/stickers", authenticate, async (req, res, next) => {
 app.get("/api/exchange", authenticate, async (req, res, next) => {
   try {
     res.json(await getExchangeSummary(req.user.id));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/exchange/external-preview", authenticate, async (req, res, next) => {
+  try {
+    res.json(await getExternalExchangePreview(req.user.id, req.body));
   } catch (error) {
     next(error);
   }
