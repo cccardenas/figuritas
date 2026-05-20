@@ -743,14 +743,31 @@ function getCatalogStickerKeys() {
   return albumId === "worldcup-2026" ? getWorldCup2026CatalogKeys() : null;
 }
 
+function getCanonicalFwcKey(stickerKey) {
+  const safeStickerKey = String(stickerKey || "").trim().toUpperCase();
+  const startsWithFwc = /^FWC/.test(safeStickerKey);
+  const fwcSuffix = startsWithFwc ? safeStickerKey.replace(/^FWC/, "") : "";
+  const digits = startsWithFwc
+    ? /[A-Z]/.test(fwcSuffix)
+      ? ""
+      : fwcSuffix.replace(/[^0-9]/g, "")
+    : /^[0-9]+$/.test(safeStickerKey)
+      ? safeStickerKey
+      : "";
+
+  if (!digits) return null;
+
+  const number = Number(digits);
+  if (!Number.isSafeInteger(number) || number < 0 || number > 19) return null;
+
+  return number === 0 ? "FWC-00" : `FWC-${number}`;
+}
+
 function getCanonicalStickerKey(stickerKey) {
   const safeStickerKey = String(stickerKey || "").trim().toUpperCase();
-  const legacyFwcMatch = safeStickerKey.match(/^(?:FWC-)?(00|0?[1-9]|1[0-9])$/);
+  const fwcKey = albumId === "worldcup-2026" ? getCanonicalFwcKey(safeStickerKey) : null;
 
-  if (albumId === "worldcup-2026" && legacyFwcMatch) {
-    const number = legacyFwcMatch[1] === "00" ? "00" : String(Number(legacyFwcMatch[1]));
-    return `FWC-${number}`;
-  }
+  if (fwcKey) return fwcKey;
 
   return safeStickerKey;
 }
@@ -1570,13 +1587,18 @@ async function getMissingStickerExportRows(userId) {
 
   if (catalogKeys) {
     const [rows] = await getPool().query(
-      "SELECT sticker_key FROM sticker_counts WHERE user_id = ? AND album_id = ? AND count > 0",
+      "SELECT sticker_key, count FROM sticker_counts WHERE user_id = ? AND album_id = ?",
       [safeUserId, albumId],
     );
-    const ownedKeys = new Set(rows.map((row) => getCanonicalStickerKey(row.sticker_key)));
+    const canonicalCounts = getCanonicalCounts(
+      rows.reduce((counts, row) => {
+        counts[row.sticker_key] = Number(row.count);
+        return counts;
+      }, {}),
+    );
 
     return catalogKeys
-      .filter((stickerKey) => !ownedKeys.has(stickerKey))
+      .filter((stickerKey) => (canonicalCounts[getCanonicalStickerKey(stickerKey)] || 0) <= 0)
       .map((stickerKey) => mapStickerExportRow({ sticker_key: stickerKey }));
   }
 
@@ -1744,15 +1766,21 @@ async function getExternalExchangePreview(userId, payload) {
   const safeUserId = normalizeUserId(userId);
   const counts = getCanonicalCounts(await getCounts(safeUserId));
   const comparison = compareCountsWithExternalText(counts, payload);
+  const canGive = comparison.iHaveForThem;
+  const usefulForMe = comparison.iNeedFromThem;
 
   return {
     albumId,
     summary: {
       ...comparison.summary,
+      canGiveCount: canGive.length,
+      usefulForMeCount: usefulForMe.length,
       ignoredLineCount: comparison.parsed.ignoredLines.length,
     },
-    iHaveForThem: comparison.iHaveForThem,
-    iNeedFromThem: comparison.iNeedFromThem,
+    canGive,
+    usefulForMe,
+    iHaveForThem: canGive,
+    iNeedFromThem: usefulForMe,
     ignoredLines: comparison.parsed.ignoredLines,
   };
 }

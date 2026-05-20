@@ -481,6 +481,14 @@ app.post("/api/stickers/import/external-text", authenticate, async (req, res, ne
   }
 });
 
+app.post("/api/stickers/compare/external-text", authenticate, async (req, res, next) => {
+  try {
+    res.json(await getExternalExchangePreview(req.user.id, req.body));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.delete("/api/stickers", authenticate, async (req, res, next) => {
   try {
     await resetAlbum(req.user.id);
